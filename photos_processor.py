@@ -20,6 +20,7 @@ from docx.oxml import OxmlElement
 import pandas as pd
 import numpy as np
 from PIL import Image
+from width_data import WidthDataError, get_width_stats
 
 # ================= НАСТРОЙКИ =================
 PHOTO_WIDTH_CM = 10.0
@@ -293,71 +294,12 @@ def process_width_photos(doc, object_folder_path):
         return
 
     try:
-        df_raw = pd.read_excel(excel_file, header=None)
-        
-        # Ищем заголовки
-        header_row_idx = None
-        for i in range(min(20, len(df_raw))):
-            row_values = df_raw.iloc[i].astype(str).str.strip().tolist()
-            if any('Местоположение' in str(v) or 'Ширина' in str(v) for v in row_values):
-                header_row_idx = i
-                break
-        
-        if header_row_idx is None:
-            headers = df_raw.iloc[12, :4].fillna('').tolist()
-            data = df_raw.iloc[14:, :4].copy()
-            data.columns = headers
-        else:
-            headers = df_raw.iloc[header_row_idx, :4].fillna('').tolist()
-            data = df_raw.iloc[header_row_idx + 1:, :4].copy()
-            data.columns = headers
-        
-        data = data.dropna(how='all')
-        
-        # Ищем колонку с шириной
-        width_col = None
-        for col in data.columns:
-            if 'Ширина' in str(col):
-                width_col = col
-                break
-        
-        if width_col is None:
-            print("   ⚠️ Колонка с шириной не найдена")
-            return
-        
-        # Преобразуем в числа
-        data['_width_num'] = data[width_col].astype(str).str.replace(',', '.').str.replace(' ', '')
-        data['_width_num'] = pd.to_numeric(data['_width_num'], errors='coerce')
-        data_clean = data.dropna(subset=['_width_num'])
-        
-        if data_clean.empty:
-            print("   ⚠️ Нет валидных данных о ширине")
-            return
-        
-        # Находим min и max
-        min_row = data_clean.loc[data_clean['_width_num'].idxmin()]
-        max_row = data_clean.loc[data_clean['_width_num'].idxmax()]
-        
-        # Ищем колонку с местоположением
-        loc_col = None
-        for col in data_clean.columns:
-            if 'Местоположение' in str(col) or 'км+м' in str(col):
-                loc_col = col
-                break
-        
-        if loc_col is None:
-            for col in data_clean.columns:
-                if '№' in str(col):
-                    loc_col = col
-                    break
-        
-        min_coord = str(min_row[loc_col]).strip() if loc_col else ""
-        max_coord = str(max_row[loc_col]).strip() if loc_col else ""
-        
-        print(f"   ✅ Найдена МИН ширина: {min_row['_width_num']} м, координата: {min_coord}")
-        print(f"   ✅ Найдена МАКС ширина: {max_row['_width_num']} м, координата: {max_coord}")
-        
-    except Exception as e:
+        stats = get_width_stats(excel_file)
+        min_coord = stats.min_coordinate
+        max_coord = stats.max_coordinate
+        print(f"   ✅ Найдена МИН ширина: {stats.min_width} м, координата: {min_coord}")
+        print(f"   ✅ Найдена МАКС ширина: {stats.max_width} м, координата: {max_coord}")
+    except (OSError, ValueError, WidthDataError) as e:
         print(f"   ❌ Ошибка при парсинге Excel ширины: {e}")
         import traceback
         traceback.print_exc()

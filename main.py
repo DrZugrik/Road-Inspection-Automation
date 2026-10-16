@@ -54,6 +54,7 @@ import photos_processor
 from app_config import ConfigurationError, load_runtime_config
 from logging_utils import configure_logging
 from run_manifest import build_run_manifest, write_json
+from width_data import WidthDataError, get_width_stats as read_width_stats, load_width_data
 
 # Значения задаются в config.toml, переменных окружения ROAD_INSPECTION_* или CLI.
 # Глобальные имена сохранены для совместимости с существующими функциями ниже.
@@ -429,114 +430,11 @@ def load_excel_with_pandas(file_path, skip_rows, mapping):
         return pd.DataFrame()
 
 def load_width_data_with_pandas(file_path):
-    """
-    Загружает данные ширины проезжей части из Excel-файла.
-    Поддерживает два формата:
-    1. С заголовками на строке 13 (индекс 12) и данными с 15 (индекс 14)
-    2. С заголовками "№", "Местоположение, км+м", "Ширина проезжей части, м", "Дата проведения обследования"
-    """
+    """Совместимая обёртка единого загрузчика ширины для таблицы Word."""
     try:
-        # Читаем весь файл без заголовков
-        df_raw = pd.read_excel(file_path, header=None)
-
-        # Пытаемся найти строку с заголовками
-        header_row_idx = None
-        possible_headers = ['№', 'Местоположение, км+м', 'Ширина проезжей части, м', 'Дата проведения обследования']
-
-        for i in range(min(20, len(df_raw))):
-            row_values = df_raw.iloc[i].astype(str).str.strip().tolist()
-            # Проверяем, содержит ли строка основные заголовки
-            if any('Местоположение' in str(v) or 'Ширина' in str(v) for v in row_values):
-                header_row_idx = i
-                break
-
-        if header_row_idx is None:
-            # Если не нашли - используем старый формат (заголовки на строке 13)
-            print("   ℹ️ Использую старый формат (заголовки на строке 13)")
-            headers = df_raw.iloc[12, :4].fillna('').tolist()
-            data = df_raw.iloc[14:, :4].copy()
-            data.columns = headers
-        else:
-            # Используем найденные заголовки
-            print(f"   ℹ️ Найдены заголовки на строке {header_row_idx + 1}")
-            headers = df_raw.iloc[header_row_idx, :4].fillna('').tolist()
-            # Данные начинаются со следующей строки после заголовка
-            data_start = header_row_idx + 1
-            data = df_raw.iloc[data_start:, :4].copy()
-            data.columns = headers
-
-        # Удаляем пустые строки
-        data = data.dropna(how='all')
-
-        # Ищем колонку с шириной
-        width_col = None
-        for col in data.columns:
-            if 'Ширина' in str(col):
-                width_col = col
-                break
-
-        if width_col is None:
-            print("   ⚠️ Колонка с шириной не найдена")
-            return pd.DataFrame()
-
-        # Преобразуем ширину в числа (запятая -> точка)
-        data[width_col] = data[width_col].astype(str).str.replace(',', '.').str.replace(' ', '')
-        data[width_col] = pd.to_numeric(data[width_col], errors='coerce')
-
-        # Форматируем числа обратно с запятой для отображения
-        data[width_col] = data[width_col].apply(
-            lambda x: f"{x:.1f}".replace('.', ',') if pd.notna(x) else ""
-        )
-
-        # Ищем колонку с местоположением/пикетом
-        loc_col = None
-        for col in data.columns:
-            if 'Местоположение' in str(col) or 'км+м' in str(col):
-                loc_col = col
-                break
-
-        if loc_col is None:
-            # Пробуем найти колонку с номером и пикетом
-            for col in data.columns:
-                if '№' in str(col):
-                    loc_col = col
-                    break
-
-        # Обработка даты
-        date_col = None
-        for col in data.columns:
-            if 'Дата' in str(col) or 'дата' in str(col).lower():
-                date_col = col
-                break
-
-        if date_col is not None:
-            data[date_col] = data[date_col].apply(
-                lambda x: x.strftime('%d.%m.%Y') if pd.notna(x) and hasattr(x, 'strftime') else str(x)
-            )
-
-        # Переименовываем колонки для единообразия
-        new_columns = []
-        for col in data.columns:
-            col_str = str(col).strip()
-            if '№' in col_str:
-                new_columns.append('№')
-            elif 'Местоположение' in col_str or 'км+м' in col_str:
-                new_columns.append('Местоположение, км+м')
-            elif 'Ширина' in col_str:
-                new_columns.append('Ширина проезжей части, м')
-            elif 'Дата' in col_str:
-                new_columns.append('Дата проведения обследования')
-            else:
-                new_columns.append(col_str)
-
-        data.columns = new_columns
-
-        return data
-
-    except Exception as e:
+        return load_width_data(file_path)
+    except (OSError, ValueError, WidthDataError) as e:
         print(f"   ❌ Ошибка загрузки ширины: {e}")
-        import traceback
-        traceback.print_exc()
         return pd.DataFrame()
 
 
@@ -558,84 +456,15 @@ def get_width_stats(object_folder_path):
             print("   ⚠️ Excel-файл с 'Ширина' не найден")
             return None
 
-        # Загружаем данные
-        data = load_width_data_with_pandas(excel_file)
-        if data.empty:
-            print("   ⚠️ Нет данных в файле ширины")
-            return None
-
-        # Ищем колонку с шириной
-        width_col = None
-        for col in data.columns:
-            if 'Ширина' in col:
-                width_col = col
-                break
-
-        if width_col is None:
-            print("   ⚠️ Колонка с шириной не найдена")
-            return None
-
-        # Преобразуем в числа для вычислений
-        data['_width_num'] = data[width_col].astype(str).str.replace(',', '.').str.replace(' ', '')
-        data['_width_num'] = pd.to_numeric(data['_width_num'], errors='coerce')
-
-        # Удаляем строки с NaN
-        data_clean = data.dropna(subset=['_width_num'])
-
-        if data_clean.empty:
-            print("   ⚠️ Нет валидных данных о ширине")
-            return None
-
-        # Находим min и max
-        min_row = data_clean.loc[data_clean['_width_num'].idxmin()]
-        max_row = data_clean.loc[data_clean['_width_num'].idxmax()]
-
-        min_width = min_row['_width_num']
-        max_width = max_row['_width_num']
-
-        # Ищем колонку с местоположением
-        loc_col = None
-        for col in data_clean.columns:
-            if 'Местоположение' in col or 'км+м' in col:
-                loc_col = col
-                break
-
-        if loc_col is None:
-            # Пробуем найти по номеру
-            for col in data_clean.columns:
-                if '№' in col:
-                    loc_col = col
-                    break
-
-        # Получаем пикеты
-        min_piket = str(min_row[loc_col]).strip() if loc_col else "ПК0+000"
-        max_piket = str(max_row[loc_col]).strip() if loc_col else "ПК0+000"
-
-        # Приводим пикеты к формату ПКx+xxx
-        if '+' not in min_piket:
-            # Если нет плюса - возможно это просто номер
-            if loc_col and '№' in loc_col:
-                # Ищем другую колонку с местоположением
-                for col in data_clean.columns:
-                    if 'км+м' in col:
-                        min_piket = str(min_row[col]).strip()
-                        max_piket = str(max_row[col]).strip()
-                        break
-
-        # Форматируем ширину с запятой
-        min_width_str = f"{min_width:.1f}".replace('.', ',')
-        max_width_str = f"{max_width:.1f}".replace('.', ',')
-
+        stats = read_width_stats(excel_file)
         result = {
-            'min_width': min_width_str,
-            'max_width': max_width_str,
-            'min_piket': min_piket,
-            'max_piket': max_piket,
-            'min_row': min_row,
-            'max_row': max_row
+            'min_width': stats.min_width,
+            'max_width': stats.max_width,
+            'min_piket': stats.min_piket,
+            'max_piket': stats.max_piket,
         }
 
-        print(f"   📏 Ширина: MIN={min_width_str} м (пикет {min_piket}), MAX={max_width_str} м (пикет {max_piket})")
+        print(f"   📏 Ширина: MIN={stats.min_width} м (пикет {stats.min_piket}), MAX={stats.max_width} м (пикет {stats.max_piket})")
         return result
 
     except Exception as e:
