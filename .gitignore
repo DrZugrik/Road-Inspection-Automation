@@ -11,6 +11,7 @@
 !logging_utils.py
 !run_manifest.py
 !width_data.py
+!docx_placeholders.py
 !config.example.toml
 !tests/
 !tests/**

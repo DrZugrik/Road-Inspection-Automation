@@ -21,6 +21,7 @@ import pandas as pd
 import numpy as np
 from PIL import Image
 from width_data import WidthDataError, get_width_stats
+from docx_placeholders import replace_in_document
 
 # ================= НАСТРОЙКИ =================
 PHOTO_WIDTH_CM = 10.0
@@ -252,16 +253,7 @@ def process_strength_photos(doc, object_folder_path):
         run.add_picture(str(target_image), width=Cm(PHOTO_WIDTH_CM))
     print("   ✅ Фото вставлено на место {{ФОТО_ПРОЧНОСТЬ}}")
 
-    found_piket = find_placeholder_in_document(doc, "{{ПИКЕТ_ПРОЧНОСТЬ}}")
-    if found_piket:
-        if found_piket['type'] == 'paragraph':
-            para = found_piket['element']
-            for run in para.runs:
-                if 'SEQ' not in run.text and '{{' in run.text:
-                    run.text = run.text.replace("{{ПИКЕТ_ПРОЧНОСТЬ}}", "ПК0+000")
-                    break
-        else:
-            found_piket['element'].text = found_piket['element'].text.replace("{{ПИКЕТ_ПРОЧНОСТЬ}}", "ПК0+000")
+    if replace_in_document(doc, {"{{ПИКЕТ_ПРОЧНОСТЬ}}": "ПК0+000"}):
         print("   ✅ {{ПИКЕТ_ПРОЧНОСТЬ}} заменён на ПК0+000")
     else:
         print("   ⚠️ Плейсхолдер {{ПИКЕТ_ПРОЧНОСТЬ}} не найден.")
@@ -387,92 +379,13 @@ def get_total_length_from_longitudinal_excel(object_folder_path):
                     return None
                 end_piket_str = str(df.iloc[last_row, 1]).strip()
                 if "+" in end_piket_str:
-                    parts = end_piket_str.split("+")
-                    km = int(parts[0])
-                    m = int(parts[1])
-                    return km * 1000 + m
-                else:
-                    return None
-            except Exception as e:
-                print(f"   ⚠️ Ошибка при чтении длины дороги: {e}")
+                    parts = end_piket_str.split("+", 1)
+                    return int(parts[0]) * 1000 + int(parts[1])
+                return None
+            except (ValueError, IndexError, OSError) as error:
+                print(f"   ⚠️ Ошибка при чтении длины дороги: {error}")
                 return None
     return None
-
-def replace_text_preserve_style(paragraph, old_text, new_text, font_size=12):
-    """
-    Заменяет текст в параграфе, сохраняя стили и поля SEQ
-    """
-    if old_text not in paragraph.text:
-        return False
-    
-    # Получаем все прогоны
-    runs = paragraph.runs
-    if not runs:
-        # Если нет прогонов, создаем новый
-        paragraph.text = paragraph.text.replace(old_text, new_text)
-        # Устанавливаем шрифт для нового текста
-        for run in paragraph.runs:
-            run.font.size = Pt(font_size)
-            run.font.name = 'Times New Roman'
-        return True
-    
-    # Собираем весь текст параграфа
-    full_text = ''.join(run.text for run in runs)
-    
-    # Если old_text не найден в полном тексте, пробуем заменить напрямую
-    if old_text not in full_text:
-        paragraph.text = paragraph.text.replace(old_text, new_text)
-        # Устанавливаем шрифт для нового текста
-        for run in paragraph.runs:
-            run.font.size = Pt(font_size)
-            run.font.name = 'Times New Roman'
-        return True
-    
-    # Находим позицию old_text в полном тексте
-    old_pos = full_text.find(old_text)
-    old_len = len(old_text)
-    
-    # Пересобираем текст с заменой
-    current_pos = 0
-    for run in runs:
-        run_text = run.text
-        run_start = current_pos
-        run_end = current_pos + len(run_text)
-        
-        # Проверяем, попадает ли замена в этот прогон
-        if old_pos >= run_start and old_pos < run_end:
-            # Замена в этом прогоне
-            before = run_text[:old_pos - run_start]
-            after = run_text[old_pos - run_start + old_len:]
-            run.text = before + new_text + after
-            # Устанавливаем шрифт 12 для измененного прогона
-            run.font.size = Pt(font_size)
-            run.font.name = 'Times New Roman'
-        elif old_pos < run_start and old_pos + old_len > run_start:
-            # Замена начинается до прогона и заканчивается внутри
-            overlap_start = run_start - old_pos
-            overlap_len = old_len - overlap_start
-            if overlap_len > 0:
-                after = run_text[overlap_len:]
-                run.text = after
-        elif old_pos < run_end and old_pos + old_len > run_end:
-            # Замена начинается внутри прогона и заканчивается после
-            before = run_text[:old_pos - run_start]
-            run.text = before
-        elif old_pos >= run_start and old_pos + old_len <= run_end:
-            # Полная замена внутри прогона - уже обработано выше
-            pass
-        
-        current_pos += len(run_text)
-    
-    # Обновляем размер шрифта для всех прогонов
-    for run in runs:
-        if run.font.size is None:
-            run.font.size = Pt(font_size)
-        if run.font.name is None:
-            run.font.name = 'Times New Roman'
-    
-    return True
 
 def clean_unused_placeholders(doc):
     """
@@ -528,36 +441,7 @@ def clean_unused_placeholders(doc):
         '{{ФОТО_ШИРИНА_10}}',
     ]
     
-    removed_count = 0
-    
-    # Обрабатываем параграфы - собираем пустые для удаления
-    paragraphs_to_remove = []
-    for paragraph in doc.paragraphs:
-        for placeholder in placeholders_to_remove:
-            if placeholder in paragraph.text:
-                # Удаляем плейсхолдер из текста
-                paragraph.text = paragraph.text.replace(placeholder, '')
-                # Если параграф стал пустым, помечаем на удаление
-                if not paragraph.text.strip():
-                    paragraphs_to_remove.append(paragraph)
-                removed_count += 1
-                break
-    
-    # Удаляем пустые параграфы
-    for paragraph in paragraphs_to_remove:
-        parent = paragraph._element.getparent()
-        if parent is not None:
-            parent.remove(paragraph._element)
-    
-    # Обрабатываем таблицы
-    for table in doc.tables:
-        for row in table.rows:
-            for cell in row.cells:
-                for placeholder in placeholders_to_remove:
-                    if placeholder in cell.text:
-                        cell.text = cell.text.replace(placeholder, '')
-                        removed_count += 1
-                        break
+    removed_count = replace_in_document(doc, {placeholder: '' for placeholder in placeholders_to_remove})
     
     if removed_count > 0:
         print(f"   🧹 Очищено {removed_count} незаполненных плейсхолдеров")
@@ -697,31 +581,8 @@ def distribute_photos_and_pikets(doc, object_folder_path):
             print(f"   ✅ Вставлено фото {i+1}: {selected_images[i].name}")
             
         # Вставка ПИКЕТА с сохранением стилей (шрифт 12)
-        found_piket = find_placeholder_in_document(doc, ph_piket)
-        if found_piket:
-            if found_piket['type'] == 'paragraph':
-                para = found_piket['element']
-                # Используем функцию для замены с сохранением стилей
-                if replace_text_preserve_style(para, ph_piket, pikets_str[i], CAPTION_FONT_SIZE):
-                    print(f"   ✅ Вставлен пикет {i+1}: {pikets_str[i]}")
-                else:
-                    # Если не удалось заменить с сохранением стилей, делаем простую замену
-                    para.text = para.text.replace(ph_piket, pikets_str[i])
-                    # Устанавливаем шрифт 12
-                    for run in para.runs:
-                        run.font.size = Pt(CAPTION_FONT_SIZE)
-                        run.font.name = 'Times New Roman'
-                    print(f"   ✅ Вставлен пикет {i+1}: {pikets_str[i]} (простая замена)")
-            else:
-                # В таблице
-                cell = found_piket['element']
-                cell.text = cell.text.replace(ph_piket, pikets_str[i])
-                # Устанавливаем шрифт 12
-                for paragraph in cell.paragraphs:
-                    for run in paragraph.runs:
-                        run.font.size = Pt(CAPTION_FONT_SIZE)
-                        run.font.name = 'Times New Roman'
-                print(f"   ✅ Вставлен пикет {i+1}: {pikets_str[i]}")
+        if replace_in_document(doc, {ph_piket: pikets_str[i]}):
+            print(f"   ✅ Вставлен пикет {i+1}: {pikets_str[i]}")
 
     print(f"   ✅ Обработка общих видов дороги завершена! (фото: {num_photos})")
     

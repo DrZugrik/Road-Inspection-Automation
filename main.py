@@ -55,6 +55,7 @@ from app_config import ConfigurationError, load_runtime_config
 from logging_utils import configure_logging
 from run_manifest import build_run_manifest, write_json
 from width_data import WidthDataError, get_width_stats as read_width_stats, load_width_data
+from docx_placeholders import replace_in_document
 
 # Значения задаются в config.toml, переменных окружения ROAD_INSPECTION_* или CLI.
 # Глобальные имена сохранены для совместимости с существующими функциями ниже.
@@ -158,90 +159,11 @@ def set_font_for_table(table, font_name='Times New Roman', font_size=10):
         for cell in row.cells:
             set_font_for_cell(cell, font_name, font_size)
 
-# ==============================================
-# ФУНКЦИЯ ДЛЯ ЗАМЕНЫ ТЕКСТА С СОХРАНЕНИЕМ СТИЛЕЙ
-# ==============================================
-def replace_text_preserve_style(paragraph, old_text, new_text):
-    """
-    Заменяет текст в параграфе, сохраняя стили и форматирование.
-    Работает с существующими прогонами (runs), не сбрасывая их свойства.
-    """
-    if old_text not in paragraph.text:
-        return False
-
-    # Получаем все прогоны
-    runs = paragraph.runs
-    if not runs:
-        # Если нет прогонов, создаем новый
-        paragraph.text = paragraph.text.replace(old_text, new_text)
-        return True
-
-    # Собираем весь текст параграфа
-    full_text = ''.join(run.text for run in runs)
-
-    # Если old_text не найден в полном тексте, пробуем заменить напрямую
-    if old_text not in full_text:
-        paragraph.text = paragraph.text.replace(old_text, new_text)
-        return True
-
-    # Находим позицию old_text в полном тексте
-    old_pos = full_text.find(old_text)
-    old_len = len(old_text)
-
-    # Пересобираем текст с заменой
-    current_pos = 0
-    for run in runs:
-        run_text = run.text
-        run_start = current_pos
-        run_end = current_pos + len(run_text)
-
-        # Проверяем, попадает ли замена в этот прогон
-        if old_pos >= run_start and old_pos < run_end:
-            # Замена в этом прогоне
-            before = run_text[:old_pos - run_start]
-            after = run_text[old_pos - run_start + old_len:]
-            run.text = before + new_text + after
-        elif old_pos < run_start and old_pos + old_len > run_start:
-            # Замена начинается до прогона и заканчивается внутри
-            overlap_start = run_start - old_pos
-            overlap_len = old_len - overlap_start
-            if overlap_len > 0:
-                after = run_text[overlap_len:]
-                run.text = after
-        elif old_pos < run_end and old_pos + old_len > run_end:
-            # Замена начинается внутри прогона и заканчивается после
-            before = run_text[:old_pos - run_start]
-            run.text = before
-        elif old_pos >= run_start and old_pos + old_len <= run_end:
-            # Полная замена внутри прогона - уже обработано выше
-            pass
-
-        current_pos += len(run_text)
-
-    return True
-
 def replace_text_placeholders_preserve_style(doc, metadata):
     """
     Заменяет текстовые плейсхолдеры в документе с сохранением форматирования
     """
-    replaced_count = 0
-
-    # Обрабатываем параграфы
-    for paragraph in doc.paragraphs:
-        for key, value in metadata.items():
-            if key in paragraph.text:
-                if replace_text_preserve_style(paragraph, key, str(value)):
-                    replaced_count += 1
-
-    # Обрабатываем таблицы
-    for table in doc.tables:
-        for row in table.rows:
-            for cell in row.cells:
-                for key, value in metadata.items():
-                    if key in cell.text:
-                        # В ячейках проще - заменяем текст напрямую
-                        cell.text = cell.text.replace(key, str(value))
-                        replaced_count += 1
+    replaced_count = replace_in_document(doc, metadata)
 
     print(f"   ✅ Заменено {replaced_count} текстовых плейсхолдеров (с сохранением стилей)")
     return replaced_count
