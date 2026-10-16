@@ -1,0 +1,44 @@
+# По умолчанию не публикуем содержимое рабочего каталога.
+# В репозиторий попадают только основные рабочие модули и документация.
+*
+
+# Разрешённые исходные файлы.
+!main.py
+!photos_processor.py
+!generate_folder_list.py
+!analyze_numbering.py
+
+# Разрешённая документация.
+!README.md
+!IMPROVEMENTS_FOR_DISCUSSION.md
+
+# Этот файл должен быть в репозитории.
+!.gitignore
+
+# Явно исключаем типовые рабочие, входные, выходные и архивные материалы.
+/.continue/
+/venv/
+/.venv/
+/__pycache__/
+/output/
+/template/
+/temp_images/
+/ok1/
+/ok2/
+/Release-*/
+/poppler-*/
+/тестовые скрипты/
+/тестовые скрипты-2/
+
+# Локальная конфигурация IDE и ОС.
+/.vscode/
+/.idea/
+*.code-workspace
+.DS_Store
+Thumbs.db
+
+# Временные и резервные файлы Office.
+~$*.docx
+~$*.xlsx
+*.tmp
+*.bak
