@@ -26,6 +26,7 @@
 /venv/
 /.venv/
 /__pycache__/
+**/__pycache__/
 /output/
 /template/
 /temp_images/
