@@ -31,11 +31,15 @@ main.py - Генератор отчетов из данных Excel для не�
 {{ФОТО_ВИД_ДОРОГА_ПИКЕТ_1}} ... {{ФОТО_ВИД_ДОРОГА_ПИКЕТ_7}} - подписи пикетов
 """
 
+import argparse
+import logging
 import os
 import shutil
 import json
+import sys
 import zipfile
 import re
+from datetime import datetime
 from pathlib import Path
 from docx import Document
 from docx.shared import Pt, Cm, Inches, RGBColor
@@ -47,21 +51,17 @@ import pandas as pd
 import numpy as np
 from PIL import Image
 import photos_processor
+from app_config import ConfigurationError, load_runtime_config
+from logging_utils import configure_logging
+from run_manifest import build_run_manifest, write_json
 
-# Конфигурация
-TEMPLATE_PATH = r"D:\ProgrammEngine\road_inspection_automation\template\template_6.docx"
-CATALOG_PATH = r"D:\ProgrammEngine\road_inspection_automation\template\Восстановление АД (форма ЦУКС)_2 этап_12.08.2026.xlsx"
-#CATALOG_PATH = r"D:\ProgrammEngine\road_inspection_automation\template\Перечень дорог 2 этап.xlsx"
-BASE_DIR = Path(r"D:\ProgrammEngine\road_inspection_automation")
-OUTPUT_DIR = BASE_DIR / "output"
+# Значения задаются в config.toml, переменных окружения ROAD_INSPECTION_* или CLI.
+# Глобальные имена сохранены для совместимости с существующими функциями ниже.
+TEMPLATE_PATH = None
+CATALOG_PATH = None
+OUTPUT_DIR = None
 
-# Конфигурация источника данных
-SOURCE_DIR = r"C:\Users\user\Downloads\4 этап - доделки 01,10,2026"
-
-# Список папок для обработки
-FOLDERS_TO_PROCESS = [
-    SOURCE_DIR,
-]
+LOGGER = logging.getLogger(__name__)
 
 # Маппинг плейсхолдеров таблиц
 PLACEHOLDER_MAPPING = {
@@ -167,33 +167,33 @@ def replace_text_preserve_style(paragraph, old_text, new_text):
     """
     if old_text not in paragraph.text:
         return False
-    
+
     # Получаем все прогоны
     runs = paragraph.runs
     if not runs:
         # Если нет прогонов, создаем новый
         paragraph.text = paragraph.text.replace(old_text, new_text)
         return True
-    
+
     # Собираем весь текст параграфа
     full_text = ''.join(run.text for run in runs)
-    
+
     # Если old_text не найден в полном тексте, пробуем заменить напрямую
     if old_text not in full_text:
         paragraph.text = paragraph.text.replace(old_text, new_text)
         return True
-    
+
     # Находим позицию old_text в полном тексте
     old_pos = full_text.find(old_text)
     old_len = len(old_text)
-    
+
     # Пересобираем текст с заменой
     current_pos = 0
     for run in runs:
         run_text = run.text
         run_start = current_pos
         run_end = current_pos + len(run_text)
-        
+
         # Проверяем, попадает ли замена в этот прогон
         if old_pos >= run_start and old_pos < run_end:
             # Замена в этом прогоне
@@ -214,9 +214,9 @@ def replace_text_preserve_style(paragraph, old_text, new_text):
         elif old_pos >= run_start and old_pos + old_len <= run_end:
             # Полная замена внутри прогона - уже обработано выше
             pass
-        
+
         current_pos += len(run_text)
-    
+
     return True
 
 def replace_text_placeholders_preserve_style(doc, metadata):
@@ -224,14 +224,14 @@ def replace_text_placeholders_preserve_style(doc, metadata):
     Заменяет текстовые плейсхолдеры в документе с сохранением форматирования
     """
     replaced_count = 0
-    
+
     # Обрабатываем параграфы
     for paragraph in doc.paragraphs:
         for key, value in metadata.items():
             if key in paragraph.text:
                 if replace_text_preserve_style(paragraph, key, str(value)):
                     replaced_count += 1
-    
+
     # Обрабатываем таблицы
     for table in doc.tables:
         for row in table.rows:
@@ -241,7 +241,7 @@ def replace_text_placeholders_preserve_style(doc, metadata):
                         # В ячейках проще - заменяем текст напрямую
                         cell.text = cell.text.replace(key, str(value))
                         replaced_count += 1
-    
+
     print(f"   ✅ Заменено {replaced_count} текстовых плейсхолдеров (с сохранением стилей)")
     return replaced_count
 
@@ -257,10 +257,10 @@ def normalize_string(text):
     """
     if not isinstance(text, str):
         return ""
-    
+
     # Приводим к нижнему регистру
     text = text.lower().strip()
-    
+
     # Заменяем различные варианты написания
     replacements = {
         'а/д': 'ад',
@@ -277,16 +277,16 @@ def normalize_string(text):
         'проезд': 'пр',
         'шоссе': 'ш',
     }
-    
+
     for old, new in replacements.items():
         text = text.replace(old, new)
-    
+
     # Удаляем все знаки препинания и лишние символы
     text = re.sub(r'[^\w\s]', ' ', text)
-    
+
     # Удаляем множественные пробелы
     text = re.sub(r'\s+', ' ', text)
-    
+
     return text.strip()
 
 def find_matching_road(folder_name, df, col_name='Наименование дороги'):
@@ -295,22 +295,22 @@ def find_matching_road(folder_name, df, col_name='Наименование до�
     с использованием нестрогого сравнения
     """
     folder_normalized = normalize_string(folder_name)
-    
+
     best_match = None
     best_score = 0
-    
+
     for idx, row in df.iterrows():
         excel_name = row[col_name]
         if pd.isna(excel_name):
             continue
-        
+
         excel_name_str = str(excel_name)
         excel_normalized = normalize_string(excel_name_str)
-        
+
         # Проверяем точное совпадение после нормализации
         if folder_normalized == excel_normalized:
             return idx, excel_name_str  # Точное совпадение!
-        
+
         # Проверяем, содержит ли одно название другое
         if folder_normalized in excel_normalized or excel_normalized in folder_normalized:
             # Чем длиннее совпадающая часть, тем лучше
@@ -318,20 +318,20 @@ def find_matching_road(folder_name, df, col_name='Наименование до�
             if match_len > best_score:
                 best_score = match_len
                 best_match = (idx, excel_name_str)
-        
+
         # Проверяем по словам (пересечение множеств слов)
         folder_words = set(folder_normalized.split())
         excel_words = set(excel_normalized.split())
-        
+
         if folder_words and excel_words:
             common_words = folder_words.intersection(excel_words)
             # Вычисляем коэффициент Жаккара (чем ближе к 1, тем лучше)
             jaccard = len(common_words) / len(folder_words.union(excel_words))
-            
+
             if jaccard > 0.5 and jaccard > best_score:
                 best_score = jaccard
                 best_match = (idx, excel_name_str)
-    
+
     return best_match if best_match else (None, None)
 # ==============================================
 
@@ -386,10 +386,10 @@ def load_excel_with_pandas(file_path, skip_rows, mapping):
         df = pd.read_excel(file_path, header=None, skiprows=skip_rows)
         df = df.iloc[:, list(mapping.keys())].copy()
         df.columns = list(mapping.values())
-        
+
         # Удаляем пустые строки
         df = df.dropna(how='all')
-        
+
         # Конвертируем числа в строки с запятой (как в Excel)
         for col in df.columns:
             if pd.api.types.is_numeric_dtype(df[col]):
@@ -397,15 +397,15 @@ def load_excel_with_pandas(file_path, skip_rows, mapping):
                 # ФОРМАТИРОВАНИЕ ДЛЯ ТАБЛИЦЫ ПРОЧНОСТИ
                 # ====================================================
                 if any(keyword in col for keyword in ['Модуль_упругости', 'Коэф_прочности', 'Прогиб']):
-                    df[col] = df[col].apply(lambda x: 
-                        f"{x:.1f}".replace('.', ',') if x >= 100 else 
+                    df[col] = df[col].apply(lambda x:
+                        f"{x:.1f}".replace('.', ',') if x >= 100 else
                         f"{x:.2f}".replace('.', ',')
                     )
                 # ====================================================
                 # ФОРМАТИРОВАНИЕ ДЛЯ ТАБЛИЦЫ ДЕФЕКТОВ (баллы)
                 # ====================================================
                 elif any(keyword in col for keyword in ['_баллы']):
-                    df[col] = df[col].apply(lambda x: 
+                    df[col] = df[col].apply(lambda x:
                         f"{x:.1f}".replace('.', ',')  # Всегда 1 знак после запятой
                     )
                 # ====================================================
@@ -413,7 +413,7 @@ def load_excel_with_pandas(file_path, skip_rows, mapping):
                 # (Продольная ровность, Поперечная ровность, метры, нормативы, глубины)
                 # ====================================================
                 else:
-                    df[col] = df[col].apply(lambda x: 
+                    df[col] = df[col].apply(lambda x:
                         f"{x:.1f}".replace('.', ',') if pd.notna(x) else ""
                     )
 
@@ -438,18 +438,18 @@ def load_width_data_with_pandas(file_path):
     try:
         # Читаем весь файл без заголовков
         df_raw = pd.read_excel(file_path, header=None)
-        
+
         # Пытаемся найти строку с заголовками
         header_row_idx = None
         possible_headers = ['№', 'Местоположение, км+м', 'Ширина проезжей части, м', 'Дата проведения обследования']
-        
+
         for i in range(min(20, len(df_raw))):
             row_values = df_raw.iloc[i].astype(str).str.strip().tolist()
             # Проверяем, содержит ли строка основные заголовки
             if any('Местоположение' in str(v) or 'Ширина' in str(v) for v in row_values):
                 header_row_idx = i
                 break
-        
+
         if header_row_idx is None:
             # Если не нашли - используем старый формат (заголовки на строке 13)
             print("   ℹ️ Использую старый формат (заголовки на строке 13)")
@@ -464,56 +464,56 @@ def load_width_data_with_pandas(file_path):
             data_start = header_row_idx + 1
             data = df_raw.iloc[data_start:, :4].copy()
             data.columns = headers
-        
+
         # Удаляем пустые строки
         data = data.dropna(how='all')
-        
+
         # Ищем колонку с шириной
         width_col = None
         for col in data.columns:
             if 'Ширина' in str(col):
                 width_col = col
                 break
-        
+
         if width_col is None:
             print("   ⚠️ Колонка с шириной не найдена")
             return pd.DataFrame()
-        
+
         # Преобразуем ширину в числа (запятая -> точка)
         data[width_col] = data[width_col].astype(str).str.replace(',', '.').str.replace(' ', '')
         data[width_col] = pd.to_numeric(data[width_col], errors='coerce')
-        
+
         # Форматируем числа обратно с запятой для отображения
         data[width_col] = data[width_col].apply(
             lambda x: f"{x:.1f}".replace('.', ',') if pd.notna(x) else ""
         )
-        
+
         # Ищем колонку с местоположением/пикетом
         loc_col = None
         for col in data.columns:
             if 'Местоположение' in str(col) or 'км+м' in str(col):
                 loc_col = col
                 break
-        
+
         if loc_col is None:
             # Пробуем найти колонку с номером и пикетом
             for col in data.columns:
                 if '№' in str(col):
                     loc_col = col
                     break
-        
+
         # Обработка даты
         date_col = None
         for col in data.columns:
             if 'Дата' in str(col) or 'дата' in str(col).lower():
                 date_col = col
                 break
-        
+
         if date_col is not None:
             data[date_col] = data[date_col].apply(
                 lambda x: x.strftime('%d.%m.%Y') if pd.notna(x) and hasattr(x, 'strftime') else str(x)
             )
-        
+
         # Переименовываем колонки для единообразия
         new_columns = []
         for col in data.columns:
@@ -528,11 +528,11 @@ def load_width_data_with_pandas(file_path):
                 new_columns.append('Дата проведения обследования')
             else:
                 new_columns.append(col_str)
-        
+
         data.columns = new_columns
-        
+
         return data
-        
+
     except Exception as e:
         print(f"   ❌ Ошибка загрузки ширины: {e}")
         import traceback
@@ -553,64 +553,64 @@ def get_width_stats(object_folder_path):
             if "Ширина" in file.name:
                 excel_file = file
                 break
-        
+
         if not excel_file:
             print("   ⚠️ Excel-файл с 'Ширина' не найден")
             return None
-        
+
         # Загружаем данные
         data = load_width_data_with_pandas(excel_file)
         if data.empty:
             print("   ⚠️ Нет данных в файле ширины")
             return None
-        
+
         # Ищем колонку с шириной
         width_col = None
         for col in data.columns:
             if 'Ширина' in col:
                 width_col = col
                 break
-        
+
         if width_col is None:
             print("   ⚠️ Колонка с шириной не найдена")
             return None
-        
+
         # Преобразуем в числа для вычислений
         data['_width_num'] = data[width_col].astype(str).str.replace(',', '.').str.replace(' ', '')
         data['_width_num'] = pd.to_numeric(data['_width_num'], errors='coerce')
-        
+
         # Удаляем строки с NaN
         data_clean = data.dropna(subset=['_width_num'])
-        
+
         if data_clean.empty:
             print("   ⚠️ Нет валидных данных о ширине")
             return None
-        
+
         # Находим min и max
         min_row = data_clean.loc[data_clean['_width_num'].idxmin()]
         max_row = data_clean.loc[data_clean['_width_num'].idxmax()]
-        
+
         min_width = min_row['_width_num']
         max_width = max_row['_width_num']
-        
+
         # Ищем колонку с местоположением
         loc_col = None
         for col in data_clean.columns:
             if 'Местоположение' in col or 'км+м' in col:
                 loc_col = col
                 break
-        
+
         if loc_col is None:
             # Пробуем найти по номеру
             for col in data_clean.columns:
                 if '№' in col:
                     loc_col = col
                     break
-        
+
         # Получаем пикеты
         min_piket = str(min_row[loc_col]).strip() if loc_col else "ПК0+000"
         max_piket = str(max_row[loc_col]).strip() if loc_col else "ПК0+000"
-        
+
         # Приводим пикеты к формату ПКx+xxx
         if '+' not in min_piket:
             # Если нет плюса - возможно это просто номер
@@ -621,11 +621,11 @@ def get_width_stats(object_folder_path):
                         min_piket = str(min_row[col]).strip()
                         max_piket = str(max_row[col]).strip()
                         break
-        
+
         # Форматируем ширину с запятой
         min_width_str = f"{min_width:.1f}".replace('.', ',')
         max_width_str = f"{max_width:.1f}".replace('.', ',')
-        
+
         result = {
             'min_width': min_width_str,
             'max_width': max_width_str,
@@ -634,10 +634,10 @@ def get_width_stats(object_folder_path):
             'min_row': min_row,
             'max_row': max_row
         }
-        
+
         print(f"   📏 Ширина: MIN={min_width_str} м (пикет {min_piket}), MAX={max_width_str} м (пикет {max_piket})")
         return result
-        
+
     except Exception as e:
         print(f"   ❌ Ошибка при получении ширины: {e}")
         import traceback
@@ -793,7 +793,7 @@ def process_table(doc, data_df, placeholder, config):
             table = doc.add_table(rows=1, cols=len(col_names))
             table.style = 'Table Grid'
             table.alignment = WD_TABLE_ALIGNMENT.CENTER
-            
+
             if placeholder == '{{ТАБЛИЦА_ШИРИНА_ДАННЫЕ}}':
                 table.columns[0].width = Inches(0.8)
                 table.columns[1].width = Inches(2.5)
@@ -848,7 +848,7 @@ def process_table(doc, data_df, placeholder, config):
                 set_font_for_paragraph(suffix_para, 'Times New Roman', 10)
 
             print(f"   ✅ Таблица создана ({len(data_df)} строк, шрифт {font_size})")
-        
+
     else:
         table = found['element']
         success = fill_table_data_keep_structure(table, data_df, col_names, placeholder, config)
@@ -857,7 +857,7 @@ def process_table(doc, data_df, placeholder, config):
         else:
             print(f"   ❌ Ошибка при заполнении таблицы")
             return False
-    
+
     configure_table_style(table)
     return True
 
@@ -882,7 +882,7 @@ def load_object_metadata(catalog_path, target_dir_name):
 
     try:
         df = pd.read_excel(catalog_path)
-        
+
         # ============================================================
         # ОПРЕДЕЛЯЕМ НАЗВАНИЯ КОЛОНОК С ГИБКИМ ПОИСКОМ
         # ============================================================
@@ -891,7 +891,7 @@ def load_object_metadata(catalog_path, target_dir_name):
         COL_NAME = 'Наименование дороги'
         COL_BALANCE = 'Балансодержатель автомобильной дороги'
         COL_ID = 'Идентификационный номер'
-        
+
         # ГИБКИЙ ПОИСК для длины - пробуем разные варианты
         length_col = None
         possible_length_names = [
@@ -906,7 +906,7 @@ def load_object_metadata(catalog_path, target_dir_name):
             if possible in df.columns:
                 length_col = possible
                 break
-        
+
         if length_col is None:
             print(f"⚠️ Столбец с протяженностью не найден. Будет использован '-'")
         else:
@@ -918,7 +918,7 @@ def load_object_metadata(catalog_path, target_dir_name):
         if COL_NAME not in df.columns: missing_cols.append(COL_NAME)
         if COL_BALANCE not in df.columns: missing_cols.append(COL_BALANCE)
         if COL_ID not in df.columns: missing_cols.append(COL_ID)
-        
+
         # Для номера участка - гибкий поиск
         if COL_SECTION not in df.columns:
             possible_names = ['Участок', 'Номер участка', '№ участка', 'Уч-к', 'Секция']
@@ -938,24 +938,24 @@ def load_object_metadata(catalog_path, target_dir_name):
 
         # Используем нестрогий поиск
         idx, excel_road_name = find_matching_road(target_dir_name, df, COL_NAME)
-        
+
         if idx is None:
             print(f"❌ Объект '{target_dir_name}' не найден в каталоге.")
             return {}
-        
+
         match_row = df.iloc[idx]
-        
+
         # Получаем название дороги из Excel
         road_name_excel = excel_road_name
         road_name_main = road_name_excel if road_name_excel else target_dir_name
-        
+
         # Номер участка
         section_number = "-"
         if COL_SECTION is not None and COL_SECTION in df.columns:
             raw_value = match_row[COL_SECTION]
             if pd.notna(raw_value):
                 section_number = clean_value(raw_value)
-        
+
         # ============================================================
         # ДЛИНА ДОРОГИ (с конвертацией в км и 3 знаками после запятой)
         # ============================================================
@@ -974,7 +974,7 @@ def load_object_metadata(catalog_path, target_dir_name):
                     road_length = str(raw_value)
         # ============================================================
         # ============================================================
-        
+
         metadata = {
             '{{НОМЕР_ПП}}': clean_value(match_row[COL_NUM]),
             '{{НОМЕР_УЧСТОК}}': section_number,
@@ -987,7 +987,7 @@ def load_object_metadata(catalog_path, target_dir_name):
             '{{ДОРОГА_ШИРИНА_MIN}}': '-',  # Будет заполнено позже
             '{{ДОРОГА_ШИРИНА_MAX}}': '-',  # Будет заполнено позже
         }
-        
+
         print("✅ Найдены метаданные для объекта:")
         for k, v in metadata.items():
             print(f"   {k} -> {v}")
@@ -1025,7 +1025,7 @@ def process_all_tables(doc, data_dir):
                 skip_rows = config.get('skip_rows', 4)
                 mapping = config['excel_mapping']
                 df_filtered = load_excel_with_pandas(excel_file, skip_rows, mapping)
-            
+
             if 'Соответствие нормативу' in df_filtered.columns:
                 df_filtered['Соответствие нормативу'] = df_filtered['Соответствие нормативу'].astype(str).str.strip()
                 df_filtered['Соответствие нормативу'] = df_filtered['Соответствие нормативу'].replace({
@@ -1033,12 +1033,12 @@ def process_all_tables(doc, data_dir):
                 })
             if placeholder == '{{ТАБЛИЦА_ПРОЧНОСТЬ_ДАННЫЕ}}':
                 df_filtered['Температура, °C'] = '+24'
-            
+
             print(f"   📊 Обработано {len(df_filtered)} строк данных")
             if len(df_filtered) > 0:
                 print(f"   📋 Первые строки данных:")
                 print(df_filtered.head(3).to_string())
-            
+
             success = process_table(doc, df_filtered, placeholder, config)
             results.append({
                 'placeholder': placeholder,
@@ -1053,11 +1053,11 @@ def process_all_tables(doc, data_dir):
             results.append({'placeholder': placeholder, 'status': 'error', 'error': str(e)})
     return results
 
-def generate_report_for_single_folder(folder_path, template_path):
+def generate_report_for_single_folder(folder_path, template_path, update_word_fields=True):
     folder_name = folder_path.name
     print(f"\n📁 Обработка папки: {folder_name}")
     print("-" * 60)
-    
+
     metadata = load_object_metadata(CATALOG_PATH, folder_name)
 
     # ============================================================
@@ -1075,7 +1075,7 @@ def generate_report_for_single_folder(folder_path, template_path):
 
     pp_number = str(metadata.get('{{НОМЕР_ПП}}', '')).strip() if metadata else ''
     sec_number = str(metadata.get('{{НОМЕР_УЧСТОК}}', '')).strip() if metadata else ''
-    
+
     if pp_number and pp_number != '-':
         # Используем название из Excel для имени файла
         road_name = metadata.get('{{ДОРОГА_НАЗВАНИЕ}}', folder_name) if metadata else folder_name
@@ -1084,55 +1084,55 @@ def generate_report_for_single_folder(folder_path, template_path):
         output_filename = f"{pp_number}_{sec_number}_{road_name_clean}_report.docx"
     else:
         output_filename = f"{folder_name}_report.docx"
-        
+
     output_file = OUTPUT_DIR / output_filename
     output_file.parent.mkdir(parents=True, exist_ok=True)
-    
+
     # ВАЖНОЕ ИЗМЕНЕНИЕ: Копируем шаблон в выходной файл
     shutil.copy2(template_path, output_file)
-    
+
     # ОТКРЫВАЕМ ФАЙЛ, КОТОРЫЙ БУДЕМ РЕДАКТИРОВАТЬ
     doc = Document(output_file)
-    
+
     if metadata:
         # Используем функцию с сохранением стилей для текстовых плейсхолдеров
         replace_text_placeholders_preserve_style(doc, metadata)
         print("✅ Текстовые плейсхолдеры заменены с сохранением стилей.")
     else:
         print("⚠️ Метаданные не загружены.")
-    
+
     # 1. Сначала вставляем ТАБЛИЦЫ
     results = process_all_tables(doc, folder_path)
-    
+
     # 2. Сохраняем файл и ЗАКРЫВАЕМ его в python-docx
     doc.save(output_file)
-    
+
     # 3. ОТКРЫВАЕМ ЭТОТ ЖЕ ФАЙЛ ЗАНОВО для вставки фото
     # Это сбрасывает все конфликты ID картинок и даёт Word "чистый лист"
     doc = Document(output_file)
-    
+
     # 4. Вставляем ФОТОГРАФИИ в только что открытый документ
     photos_processor.process_kern_photos(doc, folder_path)
     photos_processor.process_strength_photos(doc, folder_path)
     photos_processor.process_width_photos(doc, folder_path)
     photos_processor.distribute_photos_and_pikets(doc, folder_path)
-    
+
     # 5. Сохраняем финальную версию
     doc.save(output_file)
     print(f"\n✅ Отчет сохранен: {output_file}")
-    
+
     # ====================================================
     # РАСШИРЕННЫЙ JSON С МЕТАДАННЫМИ
     # ====================================================
     result_file = output_file.with_suffix('.json')
-    
+
     # Подготавливаем данные для JSON
     json_data = {
         'folder': folder_name,
         'output_file': str(output_file),
         'processed_tables': results
     }
-    
+
     # Добавляем метаданные, если они есть
     if metadata:
         json_data['metadata'] = {
@@ -1144,7 +1144,7 @@ def generate_report_for_single_folder(folder_path, template_path):
             'название_дороги_в_отчете': metadata.get('{{ДОРОГА_НАЗВАНИЕ}}', ''),
             'балансодержатель': metadata.get('{{БАЛАНСОДЕРЖАТЕЛЬ}}', '')
         }
-    
+
     with open(result_file, 'w', encoding='utf-8') as f:
         json.dump(json_data, f, ensure_ascii=False, indent=2)
     # ====================================================
@@ -1152,64 +1152,141 @@ def generate_report_for_single_folder(folder_path, template_path):
     # =========================
     # Обновление полей через COM
     # =========================
-    try:
-        import win32com.client as win32
-        word = win32.gencache.EnsureDispatch('Word.Application')
-        word.Visible = False
-        
-        doc_com = word.Documents.Open(str(output_file))
-        doc_com.Fields.Update()  # ВАЖНО: Обновляем все поля!
-        doc_com.Save()
-        doc_com.Close()
-        word.Quit()
+    if update_word_fields:
+        try:
+            import win32com.client as win32
+            word = win32.gencache.EnsureDispatch('Word.Application')
+            word.Visible = False
+
+            doc_com = word.Documents.Open(str(output_file))
+            doc_com.Fields.Update()  # ВАЖНО: Обновляем все поля!
+            doc_com.Save()
+            doc_com.Close()
+            word.Quit()
 #        print("✅ Поля SEQ успешно обновлены перед сохранением.")
-    except Exception as e:
-        print(f"⚠️ Не удалось обновить поля через COM: {e}")
+        except Exception as e:
+            print(f"⚠️ Не удалось обновить поля через COM: {e}")
+    else:
+        LOGGER.info('Обновление полей Word через COM отключено параметрами запуска.')
     # =========================
-    #     
-    return results
+    #
+    return results, output_file
+
+def parse_args():
+    parser = argparse.ArgumentParser(description='Пакетная генерация отчётов по обследованию дорог.')
+    parser.add_argument('--config', type=Path, help='Путь к TOML-файлу конфигурации.')
+    parser.add_argument('--template', type=Path, help='Путь к DOCX-шаблону.')
+    parser.add_argument('--catalog', type=Path, help='Путь к Excel-каталогу объектов.')
+    parser.add_argument('--source', type=Path, help='Папка одного объекта или корневая папка объектов.')
+    parser.add_argument('--folder', dest='folders', type=Path, action='append', help='Конкретная папка объекта; аргумент можно повторять.')
+    parser.add_argument('--output-dir', type=Path, help='Каталог результатов.')
+    parser.add_argument('--process-subfolders', action='store_true', help='Обрабатывать подпапки --source вместо самой папки --source.')
+    parser.add_argument('--skip-com-update', action='store_true', help='Не обновлять поля Word через COM.')
+    parser.add_argument('--log-level', choices=('DEBUG', 'INFO', 'WARNING', 'ERROR'), help='Уровень журналирования.')
+    return parser.parse_args()
+
+
+def generate_folder_result(folder_path, template_path, update_word_fields=True):
+    """Возвращает единый результат папки и не прерывает пакет при ошибке объекта."""
+    started_at = datetime.now().astimezone().isoformat(timespec='seconds')
+    result = {
+        'folder': folder_path.name,
+        'folder_path': str(folder_path),
+        'status': 'failed',
+        'warnings': [],
+        'errors': [],
+        'output_file': None,
+        'processed_tables': [],
+        'processed_photos': [],
+        'started_at': started_at,
+    }
+    try:
+        table_results, output_file = generate_report_for_single_folder(folder_path, template_path, update_word_fields)
+        result['processed_tables'] = table_results
+        result['output_file'] = str(output_file)
+        failed_tables = [item for item in table_results if item['status'] != 'success']
+        if failed_tables:
+            result['status'] = 'completed_with_warnings'
+            result['warnings'].append(f'Не обработано элементов таблиц/схем: {len(failed_tables)}.')
+        else:
+            result['status'] = 'success'
+
+    except Exception as error:
+        LOGGER.exception('Критическая ошибка при обработке папки %s.', folder_path)
+        result['errors'].append(str(error))
+    result['finished_at'] = datetime.now().astimezone().isoformat(timespec='seconds')
+    return result
+
 
 def main():
+    global TEMPLATE_PATH, CATALOG_PATH, OUTPUT_DIR
+    args = parse_args()
+    try:
+        config = load_runtime_config(args)
+    except ConfigurationError as error:
+        print(f'Ошибка конфигурации: {error}', file=sys.stderr)
+        return 2
+
+    TEMPLATE_PATH = config.template_path
+    CATALOG_PATH = config.catalog_path
+    OUTPUT_DIR = config.output_dir
+    logger = configure_logging(OUTPUT_DIR, config.log_level)
+    logger.info('Запуск генерации. Конфигурация: template=%s, catalog=%s, output=%s.', TEMPLATE_PATH, CATALOG_PATH, OUTPUT_DIR)
     print("=" * 80)
     print("🚀 ПАКЕТНАЯ ГЕНЕРАЦИЯ ОТЧЕТОВ (PANDAS)")
     print("=" * 80)
-    
+
     if not Path(TEMPLATE_PATH).exists():
         print(f"❌ Шаблон не найден: {TEMPLATE_PATH}")
-        return
+        return 2
     if not Path(CATALOG_PATH).exists():
         print(f"❌ Каталог объектов не найден: {CATALOG_PATH}")
-        return
-    
+        return 2
+
     print(f"📄 Шаблон: {TEMPLATE_PATH}")
-    print(f"📁 Кол-во папок для обработки: {len(FOLDERS_TO_PROCESS)}")
+    print(f"📁 Кол-во папок для обработки: {len(config.folders_to_process)}")
     print()
-    
-    all_results = {}
-    for folder_path_str in FOLDERS_TO_PROCESS:
-        folder_path = Path(folder_path_str)
+
+    all_results = []
+    for folder_path in config.folders_to_process:
         if not folder_path.exists():
-            print(f"⚠️ Папка не найдена, пропуск: {folder_path_str}")
+            print(f"⚠️ Папка не найдена, пропуск: {folder_path}")
+            timestamp = datetime.now().astimezone().isoformat(timespec='seconds')
+            all_results.append({
+                'folder': folder_path.name,
+                'folder_path': str(folder_path),
+                'status': 'failed',
+                'warnings': [],
+                'errors': ['Папка не найдена.'],
+                'output_file': None,
+                'processed_tables': [],
+                'processed_photos': [],
+                'started_at': timestamp,
+                'finished_at': timestamp,
+            })
             continue
-        
-        results = generate_report_for_single_folder(folder_path, TEMPLATE_PATH)
-        all_results[folder_path.name] = results
-    
+        all_results.append(generate_folder_result(folder_path, TEMPLATE_PATH, config.update_word_fields))
+
     print("\n" + "=" * 80)
     print("📊 ИТОГОВЫЙ ОТЧЕТ ПО ВСЕМ ПАПКАМ")
     print("=" * 80)
-    
+
     total_success = 0
     total_errors = 0
-    for folder_name, res_list in all_results.items():
-        success = sum(1 for r in res_list if r['status'] == 'success')
-        errors = sum(1 for r in res_list if r['status'] in ['error', 'failed'])
+    for folder_result in all_results:
+        table_results = folder_result['processed_tables']
+        success = sum(1 for item in table_results if item['status'] == 'success')
+        errors = len(folder_result['errors']) + sum(1 for item in table_results if item['status'] in ['error', 'failed'])
         total_success += success
         total_errors += errors
-        print(f"📁 {folder_name}: ✅ {success} / ❌ {errors}")
-    
+        print(f"📁 {folder_result['folder']}: {folder_result['status']} | ✅ {success} / ❌ {errors}")
+
     print(f"\n✅ Всего успешно: {total_success}")
     print(f"❌ Всего ошибок: {total_errors}")
+    manifest_path = OUTPUT_DIR / 'run_manifests' / f"run_{datetime.now():%Y%m%d_%H%M%S}.json"
+    write_json(manifest_path, build_run_manifest(config, all_results))
+    logger.info('Сводный манифест сохранён: %s', manifest_path)
+    return 1 if any(result['status'] == 'failed' for result in all_results) else 0
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

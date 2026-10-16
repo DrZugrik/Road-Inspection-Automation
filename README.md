@@ -75,29 +75,32 @@ road_inspection_automation/
 - `python-dateutil`.
 
 В текущей версии проекта корневой `requirements.txt` отсутствует. Перечень используемых версий найден в `тестовые скрипты-2/requirements.txt`; перед развёртыванием рекомендуется подготовить отдельный корневой файл зависимостей в UTF-8.
+## Настройка путей и запуска
 
-## Настройка путей
+Рабочие пути больше не задаются в исходном коде. Приоритет источников настроек: аргументы командной строки → TOML-файл → переменные окружения `ROAD_INSPECTION_*`.
 
-Пути сейчас задаются непосредственно в начале `main.py`:
+1. Скопируйте `config.example.toml` в локальный `config.toml` (он намеренно не отслеживается Git).
+2. Укажите пути `template_path`, `catalog_path`, `source_dir` и `output_dir`.
+3. Запустите генератор с `--config .\config.toml`.
 
-```python
-TEMPLATE_PATH = r"D:\ProgrammEngine\road_inspection_automation\template\template_6.docx"
-CATALOG_PATH = r"D:\ProgrammEngine\road_inspection_automation\template\Восстановление АД (форма ЦУКС)_2 этап_12.08.2026.xlsx"
-BASE_DIR = Path(r"D:\ProgrammEngine\road_inspection_automation")
-OUTPUT_DIR = BASE_DIR / "output"
-SOURCE_DIR = r"C:\Users\user\Downloads\4 этап - доделки 01,10,2026"
-FOLDERS_TO_PROCESS = [SOURCE_DIR]
+Пример пакетной обработки подпапок источника:
+
+```powershell
+& .\venv\Scripts\python.exe .\main.py --config .\config.toml
 ```
 
-Перед запуском необходимо проверить и при необходимости изменить:
+Пример явного запуска без TOML и без Microsoft Word/COM:
 
-1. `TEMPLATE_PATH` — путь к используемому Word-шаблону.
-2. `CATALOG_PATH` — путь к Excel-каталогу объектов.
-3. `SOURCE_DIR` — корневая папка с объектами либо путь к одному объекту.
-4. `FOLDERS_TO_PROCESS` — список конкретных папок, для которых создаются отчёты.
-5. `OUTPUT_DIR` — каталог результатов.
+```powershell
+& .\venv\Scripts\python.exe .\main.py `
+  --template "D:\data\template\template_6.docx" `
+  --catalog "D:\data\template\catalog.xlsx" `
+  --source "D:\data\objects\Проезд Энергетиков" `
+  --output-dir "D:\data\output" `
+  --skip-com-update
+```
 
-> Текущая конфигурация содержит абсолютные пути конкретного рабочего места. Это известное ограничение: перенос проекта на другой компьютер потребует корректировки путей.
+Для обработки конкретных объектов можно повторять аргумент `--folder`. Параметр `--process-subfolders` заставляет интерпретировать `--source` как каталог с объектами.
 
 ## Подготовка входных данных
 
@@ -180,14 +183,13 @@ FOLDERS_TO_PROCESS = [SOURCE_DIR]
 ```
 
 ## Запуск
-
-Из корня проекта, после настройки путей:
+Из корня проекта после настройки `config.toml`:
 
 ```powershell
-& .\venv\Scripts\python.exe .\main.py
+& .\\venv\\Scripts\\python.exe .\\main.py --config .\\config.toml
 ```
 
-Для вывода списка подпапок, который можно использовать в `FOLDERS_TO_PROCESS`:
+Для вывода списка подпапок:
 
 ```powershell
 & .\venv\Scripts\python.exe .\generate_folder_list.py
@@ -205,6 +207,8 @@ FOLDERS_TO_PROCESS = [SOURCE_DIR]
 
 - `<название>_report.docx` — итоговый Word-отчёт;
 - `<название>_report.json` — манифест обработки.
+- `logs/run_<дата-время>.log` — журнал запуска;
+- `run_manifests/run_<дата-время>.json` — сводный статус всех папок пакетного запуска.
 
 Пример структуры JSON-манифеста:
 
@@ -225,13 +229,12 @@ FOLDERS_TO_PROCESS = [SOURCE_DIR]
 
 ## Ограничения текущей реализации
 
-- конфигурация путей пока не вынесена в файл настроек или аргументы командной строки;
-- ошибки и этапы обработки выводятся через `print()`, а не через централизованное логирование;
+- основной сценарий запуска использует TOML/CLI-конфигурацию и сохраняет журнал выполнения; часть старых рабочих функций пока продолжает выводить подробную диагностику через `print()`;
 - поиск плейсхолдеров выполняется в основных абзацах и таблицах, без гарантированного обхода всех контейнеров Word;
 - часть операций с текстом ячеек Word может сбрасывать форматирование;
 - выбор Excel-файла и фотопапки основан на фрагментах имён и требует соблюдения соглашений об именовании;
 - финальное обновление Word-полей зависит от установленного Microsoft Word и COM;
-- автоматизированные тесты и корневой файл зависимостей пока отсутствуют.
+- добавлены базовые проверки `unittest` для конфигурации и сводного манифеста; корневой файл зависимостей пока отсутствует.
 
 Подробный список предложений доработки и их приоритетов см. в [IMPROVEMENTS_FOR_DISCUSSION.md](IMPROVEMENTS_FOR_DISCUSSION.md).
 
@@ -240,7 +243,8 @@ FOLDERS_TO_PROCESS = [SOURCE_DIR]
 Перед внесением изменений в код можно выполнить базовую проверку синтаксиса:
 
 ```powershell
-& .\venv\Scripts\python.exe -m py_compile .\main.py .\photos_processor.py .\generate_folder_list.py .\analyze_numbering.py
+& .\venv\Scripts\python.exe -m py_compile .\main.py .\photos_processor.py .\generate_folder_list.py .\analyze_numbering.py .\app_config.py .\logging_utils.py .\run_manifest.py
+& .\venv\Scripts\python.exe -m unittest discover -s .\tests -v
 ```
 
 Эта команда проверяет синтаксис и импорты на уровне компиляции, но не запускает генерацию отчётов и не проверяет фактические входные Excel/DOCX-файлы.

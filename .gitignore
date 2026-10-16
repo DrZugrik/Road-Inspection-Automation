@@ -7,6 +7,12 @@
 !photos_processor.py
 !generate_folder_list.py
 !analyze_numbering.py
+!app_config.py
+!logging_utils.py
+!run_manifest.py
+!config.example.toml
+!tests/
+!tests/**
 
 # Разрешённая документация.
 !README.md

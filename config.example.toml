@@ -1,0 +1,12 @@
+# Скопируйте файл как config.toml и укажите локальные пути. config.toml не отслеживается Git.
+template_path = "D:/data/template/template_6.docx"
+catalog_path = "D:/data/template/catalog.xlsx"
+source_dir = "D:/data/objects"
+output_dir = "D:/data/output"
+
+# true: обработать каждую подпапку source_dir; false: обработать source_dir как один объект.
+process_subfolders = true
+
+# false полезно на компьютерах без Microsoft Word.
+update_word_fields = true
+log_level = "INFO"
